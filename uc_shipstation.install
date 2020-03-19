@@ -1,0 +1,105 @@
+<?php
+
+/**
+ * @file
+ * Install, update, and uninstall functions for the uc shipstation module.
+ */
+
+
+/**
+ * Alter existing uc_orders schema to inform them of our custom fields
+ */
+function uc_shipstation_schema_alter(&$schema) {
+
+  /**
+   * Shipment fields
+   */
+  //   // looks like the module adds its own fields to the uc_order
+  //   $text_fields = array(
+  //     'uc_shipment_carrier' => t('Shipment Carrier'),
+  //     'uc_tracking_number' => t('Tracking Number'),
+  //     'uc_shipment_service' => t('Shipment Service'),
+  //   );
+
+  // Add fields to existing uc_orders schema.
+  // Changed fields from uc_ prefix in D7 to ss_ prefix for D6.
+  $schema['uc_orders']['fields']['ss_tracking_number'] = array(
+    'description' => 'A tracking number for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+  $schema['uc_orders']['fields']['ss_shipment_carrier'] = array(
+    'description' => 'The shipment carrier for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+  $schema['uc_orders']['fields']['ss_shipment_service'] = array(
+    'description' => 'The shipment service for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+}
+
+
+/**
+ * Implements hook_install().
+ */
+function uc_shipstation_install() {
+  $ret = array();
+  // Add fields to existing uc_orders schema.
+  // Changed fields from uc_ prefix in D7 to ss_ prefix for D6.
+  // ss_tracking_number
+  $ss_tracking_number = array(
+    'description' => 'A tracking number for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+  if(!db_column_exists('uc_orders', 'ss_tracking_number')) {
+    db_add_field($ret, 'uc_orders', 'ss_tracking_number', $ss_tracking_number);
+  }
+  // ss_shipment_carrier
+  $ss_shipment_carrier = array(
+    'description' => 'The shipment carrier for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+  if(!db_column_exists('uc_orders', 'ss_shipment_carrier')) {
+    db_add_field($ret, 'uc_orders', 'ss_shipment_carrier', $ss_shipment_carrier);
+  }
+  // ss_shipment_service
+  $ss_shipment_service = array(
+    'description' => 'The shipment service for a ShipStation order',
+    'type' => 'varchar',
+    'length' => 64,
+    'not null' => TRUE,
+    'default' => '',
+  );
+  if(!db_column_exists('uc_orders', 'ss_shipment_service')) {
+    db_add_field($ret, 'uc_orders', 'ss_shipment_service', $ss_shipment_service);
+  }
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function uc_shipstation_uninstall() {
+  $ret = array();
+  // drop ss fields
+  if(db_column_exists('uc_orders', 'ss_tracking_number')) db_drop_field($ret, 'uc_orders', 'ss_tracking_number');
+  if(db_column_exists('uc_orders', 'ss_shipment_carrier')) db_drop_field($ret, 'uc_orders', 'ss_shipment_carrier');
+  if(db_column_exists('uc_orders', 'ss_shipment_service')) db_drop_field($ret, 'uc_orders', 'ss_shipment_service');
+
+  // this looks like it's supposed to delete all shipstation vars/settings
+  // @todo ShipStation: Build support to delete variables on uninstall hook?
+  //db_delete('variable')->condition('name', db_like('uc_shipstation_') . '%', 'LIKE')->execute();
+}

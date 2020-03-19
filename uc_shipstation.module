@@ -1,0 +1,705 @@
+<?php
+
+/**
+ * @file
+ *
+ * Contains primary functions for the Ubercart ShipStation module.
+ */
+
+define('UBERCART_SHIPSTATION_DATE_FORMAT', 'm/d/y H:m A');
+
+// include conditional actions file
+require_once('uc_shipstation.ca.inc');
+
+
+/**
+ * Implements hook_help().
+ */
+function uc_shipstation_help($path, $arg) {
+  $output = '';
+  switch($path) {
+    case 'admin/store/settings/shipstation':
+      $placeholders = array(
+        '!url' => l(t('Custom Store Development Integration'), "http://api.shipstation.com/"),
+        '!endpoint' => 'http://' . $_SERVER['HTTP_HOST'] . base_path() . 'shipstation/api-endpoint'
+      );
+      return t('This module provides integration with ShipStation using the !url.
+                To connect your store to ShipStation using this service, fill in
+                the "URL to custom XML page" field in the Custom Store Setup dialog
+                with the following URL: !endpoint', $placeholders);
+  }
+  return $output;
+}
+
+
+/**
+ * Implements hook_perm().
+ */
+function uc_shipstation_perm() {
+  // Drupal 7 uses more complex array format; looks like D6 uses just a key
+  // per permission and no other info
+  // return array(
+  //   'administer shipping' => array(
+  //     'title' => t('Administer shipping'),
+  //   ),
+  //   'access fulfillment' => array(
+  //     'title' => t('Access fulfillment'),
+  //   ),
+  // );
+  return array('administer shipping', 'access fulfillment');
+}
+
+
+/**
+ * Implements hook_menu().
+ */
+function uc_shipstation_menu() {
+  $items['admin/store/settings/shipstation'] = array(
+    'title' => 'ShipStation',
+    'description' => 'Configure ShipStation Integration',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('uc_shipstation_admin_page'),
+    'access arguments' => array('administer shipping'),
+    'file' => 'uc_shipstation.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+    'weight' => 10,
+  );
+  $items['shipstation/api-endpoint'] = array(
+    'title' => 'ShipStation API Callback URI',
+    'page callback' => 'uc_shipstation_endpoint',
+    'access callback' => TRUE,  // this overrides the access argument below and always passes TRUE for the access argument
+    'access arguments' => array('access fulfillment'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+
+/**
+ * Implements hook_order_pane().
+ */
+function uc_shipstation_order_pane() {
+  // D6 addition for showing ShipStation info.
+  $panes[] = array(
+    'id' => 'uc_shipstation',
+    'callback' => 'uc_shipstation_order_pane_info',
+    'title' => t('ShipStation'),
+    'desc' => t("ShipStation Information"),
+    'class' => 'abs-left',
+    'weight' => 8,
+    'show' => array('view'),
+  );
+
+  return $panes;
+}
+
+/**
+ * Displays the ShipStation UberCart order info pane
+ *
+ * op - operation for the pane 
+ * arg1 - uc_order
+ */
+function uc_shipstation_order_pane_info($op, $arg1) {
+  // show shipstation info
+  $output = '';
+  switch ($op) {
+    case 'view':
+    case 'customer':
+      // before outputting anything make sure we have one of the data points we
+      // want to output
+      if($arg1->ss_tracking_number || $arg1->ss_shipment_service || $arg1->ss_shipment_carrier) {
+        // display it in a table for now.
+        $output .= "<table>";
+        // tracking number
+        if($arg1->ss_tracking_number) {
+          $output .= "<tr><td><strong>Tracking Number:</strong></td><td>".$arg1->ss_tracking_number."</td></tr>";
+        }
+        // shipment service
+        if($arg1->ss_shipment_service) {
+          $output .= "<tr><td><strong>Shipment Service:</strong></td><td>".$arg1->ss_shipment_service."</td></tr>";
+        }
+        // shipment carrier
+        if($arg1->ss_shipment_carrier) {
+          $output .= "<tr><td><strong>Shipment Carrier:</strong></td><td>".$arg1->ss_shipment_carrier."</td></tr>";
+        }
+        // end the table
+        $output .= "</table>";
+      }
+      break;
+    case 'show-title':
+    case 'view-title':
+      if($arg1->ss_tracking_number || $arg1->ss_shipment_service || $arg1->ss_shipment_carrier) {
+        $output = "Shipping Data";
+      } else {
+        $output = 'No Shipping Data';
+      }
+      break;
+  }
+  return $output;
+}
+
+
+
+/**
+ * Establish a service endpoint for shipstation to communicate with
+ */
+function uc_shipstation_endpoint() {
+  // this is the drupal 7 function for disabling page caching
+  // drupal_page_is_cacheable(FALSE);
+  // this SHOULD/MIGHT disable page caching for drupal 6
+  $GLOBALS['conf']['cache'] = FALSE;
+
+  // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+  // // Log each request to the endpoint if logging is enabled.
+  // if (variable_get('uc_shipstation_logging', FALSE)) {
+  //   $request_vars = $_GET;
+  //   // Obfuscate the sensitive data before logging the request.
+  //   $request_vars['SS-UserName'] = '******';
+  //   $request_vars['SS-Password'] = '******';
+  //   $request_vars['auth_key'] = '*****';
+  //   watchdog('uc_shipstation', 'ShipStation request: !get', array('!get' => var_export($request_vars, TRUE)));
+  // }
+
+  // get the action from the request
+  // pulling it into var here so I can set and test
+  $action = $_GET['action'];
+  // @todo ShipStation: Ensure testing/debug code below is removed or commented out.
+  // manually set an action for testing
+  // $action = 'shipnotify';
+  // $action = 'export';
+
+  // Authenticate the request before proceeding.
+  if(uc_shipstation_endpoint_authenticate() && !empty($action)) {
+
+    // If ShipStation is authenticated, run the call based on the action it defines.
+    switch($action) {
+      case 'export':
+        uc_shipstation_export_orders();
+        break;
+      case 'shipnotify':
+        uc_shipstation_request_ship_notify();
+        break;
+      default:
+        drupal_set_message(t('The ShipStation request action is invalid'), 'error');
+        // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+        // watchdog('uc_shipstation', 'Invalid request action received from ShipStation. Enable or check request logging for more information', array(), WATCHDOG_ERROR);
+        drupal_access_denied();
+    }
+  }
+  else {
+    drupal_set_message(t('The ShipStation request action is empty'), 'error');
+    // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+    // watchdog('uc_shipstation', 'Empty request action received from ShipStation. Enable or check request logging for more information', array(), WATCHDOG_ERROR);
+    drupal_access_denied();
+  }
+
+  // No D6 equivalent for "drupal_exit()" so just "exit"
+  exit;
+  // drupal_exit();
+}
+
+
+/**
+ * Authorizes a ShipStation request.
+ *
+ * @return bool
+ */
+function uc_shipstation_endpoint_authenticate() {
+  $auth_key = variable_get('uc_shipstation_alternate_auth', '');
+  $username = variable_get('uc_shipstation_username', '');
+  $password = variable_get('uc_shipstation_password', '');
+
+  // Allow ShipStation to authenticate using an auth token.
+  if(!empty($auth_key) && !empty($_GET['auth_key']) && $auth_key == $_GET['auth_key']) {
+    return TRUE;
+  }
+
+  // Allow ShipStation to authenticate using basic auth.
+  if(!empty($username) && !empty($password) && !empty($_SERVER['PHP_AUTH_USER']) && !empty($_SERVER['PHP_AUTH_PW'])) {
+
+    // this checks against both a hashed (md5) and non-hashed version of the password...odd
+    if(
+      $_SERVER['PHP_AUTH_USER'] == $username 
+      && ($_SERVER['PHP_AUTH_PW'] == $password || md5($_SERVER['PHP_AUTH_PW']) == $password)
+    ) {
+      return TRUE;
+    }
+  }
+
+  // If all authentication methods fail, return a 401.
+  header("WWW-Authenticate: Basic realm =\"ShipStation XML API for Drupal Ubercart");
+  header("HTTP/1.0 401 Unauthorized");
+  drupal_set_message(t('Error: Authentication failed. Please check your credentials and try again.'), 'error');
+
+  // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+  // watchdog('uc_shipstation', 'Error: Authentication failed when accepting request. Enable or check ShipStation request logging for more information.', array(), WATCHDOG_ERROR);
+
+  // No D6 equivalent for "drupal_exit()" so just "exit"
+  exit;
+  // drupal_exit();
+  // why return false if exiting?
+  return FALSE;
+}
+
+
+/**
+ * Identify orders to send back to shipstation
+ */
+function uc_shipstation_export_orders() {
+
+  // set timezone
+  $timezone = new DateTimeZone('UTC');
+  // get request values
+  $start_date = new DateTime($_GET['start_date'], $timezone);
+  $end_date = new DateTime($_GET['end_date'], $timezone);
+  $page = !empty($_GET['page']) ? intval($_GET['page']) : 0;
+
+  // @todo ShipStation: Ensure testing/debug code below is removed or commented out.
+  // manually set request vars
+  // $start_date_testval = '2018-03-12';
+  // $end_date_test_val = '2019-03-15';
+  // $page_test_val = 0;
+  // $start_date = new DateTime($start_date_testval, $timezone);
+  // $end_date = new DateTime($end_date_test_val, $timezone);
+  // $page = !empty($page_test_val) ? intval($page_test_val) : 0;
+
+  // get config vars and update request var values
+  $status = variable_get('uc_shipstation_export_status', array());
+  $page_size = variable_get('uc_shipstation_export_paging', 100);
+  $start_page = $page > 0 ? $page - 1 : 0;
+
+  // pul the order comments setting
+  $field_order_comments = variable_get('uc_shipstation_order_comments_field', 'none');
+
+  // Build a query to load orders matching our status.
+  $query = "SELECT * FROM {uc_orders} as uco";
+  $query_args = array();
+  // Add inner join for line items if any shipping method exemptions set
+  $shipping_method_exemptions = variable_get('uc_shipstation_shipping_method_exemptions', array());
+  if(!empty($shipping_method_exemptions)) {
+    // Addition for D6 -- shipping method exemptions/exclusions
+    // add inner join here first to get uc_quote data for the order
+    $query .= " INNER JOIN uc_order_quotes as ucq ON ucq.order_id = uco.order_id";
+  }
+  // start adding conditions
+  // add condition for status (stringify them)
+  $status = array_keys($status);
+  $query .= " WHERE uco.order_status IN (".db_placeholders($status, 'varchar') .")";
+  $query_args = array_merge($query_args, $status);
+  // Limit our query by start date and end date unless we're
+  // doing a full reload.
+  if(!variable_get('uc_shipstation_reload', 0)) {
+    $query .= " AND uco.modified BETWEEN %d AND %d";
+    $query_args[] = $start_date->getTimestamp();
+    $query_args[] = $end_date->getTimestamp();
+  }
+  // add shipping method exemption conditions
+  if(!empty($shipping_method_exemptions)) {
+    // unkey the array, and leave just the values
+    $shipping_method_exemptions = array_values($shipping_method_exemptions);
+    $query .= " AND ucq.method NOT IN (".db_placeholders($shipping_method_exemptions, 'varchar') .")";
+    $query_args = array_merge($query_args, $shipping_method_exemptions);
+  }
+
+  // Execute the query without the range to get a count.
+  //$count_result = $query->execute();
+  $count_result = db_query($query, $query_args);
+
+  // Add the range and re-run the query to get our records.
+  //$query->range($start_page * $page_size, $page_size);
+  $query .= " LIMIT %d,%d";
+  $query_args[] = $start_page * $page_size;
+  $query_args[] = $page_size;
+  $result = db_query($query, $query_args);
+  // add order results to array
+  $order_results = array();
+  while($order = db_fetch_object($result)) $order_results[] = $order;
+
+  // Instantiate a new XML object for our export.
+  module_load_include('inc', 'uc_shipstation', 'inc/uc_shipstation.SimpleXMLElement');
+  $output = new UbercartShipStationSimpleXMLElement('<Orders></Orders>');
+
+  // Log the request information.
+  // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+  // if (variable_get('uc_shipstation_logging')) {
+  //   watchdog('uc_shipstation', 'Action:' . check_plain($_GET['action']) .
+  //     ' Orders:' . (isset($results['uc_order']) ? count($results['uc_order']) : 0) .
+  //     ' Since:' . format_date($start_date->getTimestamp(), 'short') . '(' . $start_date->getTimestamp() . ')' .
+  //     ' To: ' . format_date($end_date->getTimestamp(), 'short') . '(' . $end_date->getTimestamp() . ')');
+  // }
+
+  // check for orders
+  if(!empty($order_results)) {
+    // load uc_order objects by order_id from order_results into order_id keyed
+    // array
+    $uc_orders = array();
+    foreach($order_results as $order_result) $uc_orders[$order_result->order_id] = uc_order_load($order_result->order_id);
+
+    // get the total pages
+    $output['pages'] = ceil($count_result->num_rows / $page_size);
+    // Allow other modules to alter the list of orders.
+    // not sure if this bit is necessary/required for d6 port
+    // $context = array(
+    //   'start_date' => $start_date->getTimestamp(),
+    //   'end_date' => $end_date->getTimestamp(),
+    //   'page' => $page,
+    //   'page_size' => $page_size
+    // );
+    // drupal_alter('uc_shipstation_export_orders', $orders, $context);
+
+    // loop through orders
+    foreach($uc_orders as $uc_order) {
+      // Fetch most of the data we need to define an order for ShipStation.
+      // no order_wrapper for d6; the order_load function used above should
+      // cover this
+      //$order_wrapper = entity_metadata_wrapper('uc_order', $order);
+
+      // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+      // if (variable_get('uc_shipstation_logging')) {
+      //   watchdog('uc_shipstation', 'Processing order ' . $order->order_id, array(), WATCHDOG_DEBUG);
+      // }
+
+      // Load the shipping line item.
+      $shipping_line_item = uc_shipstation_get_shipping_line_item($uc_order);
+
+      // Determine the shipping service and shipping method for the order.
+      if(!empty($shipping_line_item)) {
+        try {
+          $shipping_method = !empty($shipping_line_item['title']) ? $shipping_line_item['title'] : FALSE;
+        }
+        catch (Exception $ex) {
+          $shipping_method = FALSE;
+        }
+      } else {
+        // Do not proceed if a shipping line item does not exist.
+        continue;
+      }
+
+      // Only process orders which have shipping methods.
+      if(!empty($shipping_method)) {
+        // Set up the xml schema.
+        $order_xml = $output->addChild('Order');
+        $order_date = $uc_order->created;
+        $order_modified = $uc_order->modified;
+
+        // If there are payment transactions beyond the order creation date, use those.
+        // @todo ShipStation: Should most recent payment be used as Order Date?
+        $transactions = uc_payment_load_payments($uc_order->order_id);
+        if(is_array($transactions)) {
+          foreach($transactions as $transaction) {
+            if($transaction->received > $order_date) {
+              $order_date = $transaction->received;
+            }
+          }
+        }
+
+        // Process tax if there is any.
+        // @todo ShipStation: Need to pull in tax line items/make sure it's working correctly
+        $line_item_types = array_column($uc_order->line_items, 'type');
+        $index = NULL;
+        if(in_array('tax', $line_item_types)) {
+          $index = array_flip($line_item_types)['tax'];
+        }
+
+        // ShipStation allocates orders based on 5 statuses only, so translate
+        // the more complex order statuses to basic order states, which align
+        // better with ShipStation
+        // This is now a configuration setting
+        $order_status = $uc_order->order_status;
+        if(variable_get('uc_shipstation_send_order_state', 0)) $order_status = uc_shipstation_order_status_state($order_status);
+        
+        // pull more data off the order and shipping line item
+        $shipping_price = $shipping_line_item['amount'];
+        $order_fields = array(
+          '#cdata' => array(
+            'OrderNumber' => $uc_order->order_id,
+            'OrderStatus' => $order_status,
+            'ShippingMethod' => !empty($shipping_method) ? $shipping_method : t('Shipping'),
+          ),
+          '#other' => array(
+            'OrderDate' => date(UBERCART_SHIPSTATION_DATE_FORMAT, $order_date),
+            'LastModified' => date(UBERCART_SHIPSTATION_DATE_FORMAT, $order_modified),
+            'OrderTotal' => $uc_order->order_total,
+            'TaxAmount' => isset($index) ? $uc_order->line_items[$index]['amount'] : 0,
+            'ShippingAmount' => $shipping_price,
+          ),
+        );
+
+        // Attach order notes field
+        // No notes in D6; using "Comment" fields instead
+        // load the comments
+        $internal_notes = '';
+        if($field_order_comments != 'none') {
+          // attach comments if not set to none;
+          // create array to hold comments
+          $comments = array();
+          // load comment types based on string in options; options are:
+          // admin_only, order_only, order_admin
+          if(strpos($field_order_comments, 'order') !== false) {
+            // load order comments
+            $order_comments = uc_order_comments_load($uc_order->order_id, FALSE);
+            $comments += $order_comments;
+          }
+          if(strpos($field_order_comments, 'admin') !== false) {
+            // load admin order comments
+            $admin_comments = uc_order_comments_load($uc_order->order_id, TRUE);
+            $comments += $admin_comments;
+          }
+          if(!empty($comments)) {
+            foreach($comments as $comment) {
+              $internal_notes .= strip_tags($comment->message) ."\n";
+            }
+          }
+        }
+        if($internal_notes) $order_fields['#cdata']['InternalNotes'] = $internal_notes;
+
+        // Billing address.
+        $customer = $order_xml->addChild('Customer');
+        $customer_fields = array(
+          '#cdata' => array(
+            'CustomerCode' => $uc_order->primary_email,
+          ),
+        );
+        uc_shipstation_addcdata($customer, $customer_fields);
+
+        // Billing info.
+        $billing = $customer->addChild('BillTo');
+        $billing_fields = array(
+          '#cdata' => array(
+            'Name' => !empty($uc_order->billing_first_name) && !empty($uc_order->billing_last_name)
+              ? $uc_order->billing_first_name . ' ' . $uc_order->billing_last_name
+              : '',
+            'Company' => !empty($uc_order->billing_company) ? $uc_order->billing_company : '',
+            'Email' => !empty($uc_order->primary_email) ? $uc_order->primary_email : '',
+            'Phone' => $uc_order->billing_phone
+          ),
+        );
+        uc_shipstation_addcdata($billing, $billing_fields);
+
+        // get delivery country
+        $country = uc_get_country_data(array('country_name' => uc_country_get_by_id($uc_order->delivery_country)));
+
+        // Shipping info.
+        $shipping = $customer->addChild('ShipTo');
+        $shipping_fields = array(
+          '#cdata' => array(
+            'Name' => !empty($uc_order->delivery_first_name) && !empty($uc_order->delivery_last_name)
+              ? $uc_order->delivery_first_name . ' ' . $uc_order->delivery_last_name
+              : '',
+            'Company' => $uc_order->delivery_company,
+            'Address1' => $uc_order->delivery_street1,
+            'Address2' => $uc_order->delivery_street2,
+            'City' => $uc_order->delivery_city,
+            'State' => uc_get_zone_code($uc_order->delivery_zone),
+            'PostalCode' => $uc_order->delivery_postal_code,
+            'Country' => $country[0]['country_iso_code_2'],
+            'Phone' => $uc_order->delivery_phone,
+          ),
+        );
+        uc_shipstation_addcdata($shipping, $shipping_fields);
+
+        // start setting up products/line item data
+        $line_items_xml = $order_xml->addChild('Items');
+        foreach($uc_order->products as $id => $product) {
+          // Only proceed if the line item type is product based and
+          // has a product associated with it.
+          // @todo ShipStation: Couldn't find d6 UberCart equivalent for d7 data->type on a product. Ignoring for now
+          // if(empty($product) || !in_array($product->data['type'], array_flip(uc_product_type_names()))) {
+          if(empty($product)) {
+            continue;
+          }
+
+          // setup basic product data
+          $line_item_xml = $line_items_xml->addChild('Item');
+          $line_item_cdata = array(
+            'SKU' => $product->model,
+            'Name' => $product->title,
+          );
+          $line_item_fields = array(
+            '#cdata' => $line_item_cdata,
+            '#other' => array(
+              'Quantity' => (int) $product->qty,
+              'UnitPrice' => $product->price,
+            ),
+          );
+
+          // Add the line item weight.
+          // default weight units to site default
+          $weight_units = variable_get('uc_weight_unit', 'lb');
+          // load the actual product node and weight units off it if they exist
+          $uc_product_node = node_load($product->nid);
+          if($uc_product_node->weight_units) $weight_units = $uc_product_node->weight_units;
+          if(!empty($product->weight)) {
+            try {
+              // weight_units are not stored on the product in d6 like in d7
+              // but got them off the product node
+              //uc_shipstation_addweight($line_item_fields['#other'], $product->weight, $product->weight_units);
+              uc_shipstation_addweight($line_item_fields['#other'], $product->weight, $weight_units);
+            }
+            catch (Exception $ex) {
+              // The current item doesn't have a weight or we can't access it.
+              // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+              // if (variable_get('uc_shipstation_logging')) {
+              //   watchdog('uc_shipstation', 'Unable to add weight for product id :product_id to shipstation export', array(':product_id' => $product->order_product_id), WATCHDOG_WARNING);
+              // }
+            }
+          }
+
+          // add/format line item cdata
+          uc_shipstation_addcdata($line_item_xml, $line_item_fields);
+
+          // Process attributes of the product.
+          if(!empty($product->data['attributes'])) {
+            $options_xml = $line_item_xml->addChild('Options');
+            foreach($product->data['attributes'] as $name => $value) {
+              // Create new Option tag.
+              $option_xml = $options_xml->addChild('Option');
+              $data = array(
+                '#cdata' => array(
+                  'Name' => $name,
+                  'Value' => array_shift($value)
+                )
+              );
+              uc_shipstation_addcdata($option_xml, $data);
+            }
+          }
+          // Alter line item XML
+          // d6 does not alter
+          //drupal_alter('uc_shipstation_line_item_xml', $line_item_xml, $product);         
+        }
+
+        // format cdata
+        uc_shipstation_addcdata($order_xml, $order_fields);
+
+        // Alter order XML
+        // d6 does not alter
+        //drupal_alter('uc_shipstation_order_xml', $order_xml, $order);
+
+        // Notify rules that the order has been exported.
+        // d6 has no rules; use CA trigger instead
+        //rules_invoke_event('uc_shipstation_order_exported', $order);
+        ca_pull_trigger('uc_shipstation_order_exported', $uc_order);
+      }
+    }
+  }
+
+  // Return the XML response for ShipStation.
+  Header('Content-type: application/xml');
+  $dom = dom_import_simplexml($output)->ownerDocument;
+  $dom->formatOutput = TRUE;
+  print $dom->saveXML();
+}
+
+
+/**
+ * Callback for ShipStation shipnotify requests.
+ */
+function uc_shipstation_request_ship_notify() {
+  $order_number = $_GET['order_number'];
+  $tracking_number = $_GET['tracking_number'];
+  $carrier = $_GET['carrier'];
+  $service = $_GET['service'];
+
+  // @todo ShipStation: Ensure testing/debug code below is removed or commented out.
+  // manually set request vars
+  // $order_number = 128;
+  // $tracking_number = 'notreal123456';
+  // $carrier = "carrier";
+  // $service = "service";
+
+  // Order number and carrier are required fields for ShipStation and should
+  // always be provided in a shipnotify call.
+  if($order_number && $carrier) {
+    $uc_order = uc_order_load($order_number);
+    if(!empty($uc_order)) {
+      // these fields don't seem to be a part of ubercart, but manually created
+      // by this module
+      // add the values to the order and save the order
+      $uc_order->ss_tracking_number = $tracking_number;
+      $uc_order->ss_shipment_service = $service;
+      $uc_order->ss_shipment_carrier = $carrier;
+      uc_order_save($uc_order);
+      // Notify rules that the order has been updated with shipping info.
+      // d6 has no rules; use CA trigger instead
+      //rules_invoke_event('uc_shipstation_order_success', $uc_order, $tracking_number, $carrier, $service);
+      ca_pull_trigger('uc_shipstation_order_success', $uc_order);
+      
+    }
+    else {
+      // @todo ShipStation: D6 Logging Support(?) D7 used WatchDog
+      // watchdog('uc_shipstation', 'Unable to load order @order_number for updating via the ShipStation shipnotify call.', array('@order_number' => $order_number), WATCHDOG_ERROR);
+    }
+  }
+  else {
+    print t('Error: missing order info.');
+  }
+}
+
+
+/**
+ * Helper function to add CDATA segments to XML file
+ */
+function uc_shipstation_addcdata($xml, $data) {
+  if(isset($data['#cdata'])) {
+    foreach($data['#cdata'] as $field_name => $value) {
+      $xml->{$field_name} = NULL;
+      $xml->{$field_name}->addCData($value);
+    }
+  }
+  if(isset($data['#other'])) {
+    foreach($data['#other'] as $field_name => $value) {
+      $xml->{$field_name} = $value;
+    }
+  }
+}
+
+
+/**
+ * Helper function to format product weight.
+ */
+function uc_shipstation_addweight(&$data, $weight, $weight_units) {
+  switch($weight_units) {
+    case 'g':
+      $weight_units = 'Gram';
+      break;
+    case 'lb':
+      $weight_units = 'Pounds';
+      break;
+    case 'oz':
+      $weight_units = 'Ounces';
+      break;
+    case 'kg':
+      $weight_units = 'Gram';
+      $weight = 1000 * $weight;
+      break;
+  }
+  $data['Weight'] = $weight;
+  $data['WeightUnits'] = $weight_units;
+}
+
+
+/**
+ * Get the uc_order state based on the uc_order_status
+ *
+ * @return mixed
+ */
+function uc_shipstation_order_status_state($order_status) {
+  return uc_order_status_data($order_status, 'state');
+}
+
+
+/**
+ * Fetch the shipping line item on an order.
+ *
+ * @return mixed
+ */
+function uc_shipstation_get_shipping_line_item($uc_order) {
+  // loop through line items and check for shipping line item
+  foreach($uc_order->line_items as $line_item) {
+    if($line_item['type'] == 'shipping') {
+      return $line_item;
+    }
+  }
+  return FALSE;
+}

@@ -1,0 +1,12 @@
+name = Ubercart ShipStation
+description = "Herkimer backport of existing D7 module of same name for use with Timber. D7 Description: Ubercart integration with ShipStation, an online multi-channel order fulfillment system."
+core = "6.x"
+package = "Ubercart - fulfillment"
+
+dependencies[] = "uc_order"
+dependencies[] = "uc_payment"
+dependencies[] = "ca"
+dependencies[] = "uc_quote"
+
+
+project = "uc_shipstation"
